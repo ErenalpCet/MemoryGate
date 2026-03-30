@@ -48,7 +48,7 @@ Low importance (label = 0):
 Clone the repository:
 
 ```
-git clone https://github.com/ErenalpCet/MemoryGate.git
+git clone https://github.com/your-username/MemoryGate.git
 cd MemoryGate
 ```
 
@@ -64,7 +64,7 @@ Set up your environment variables by copying the example file:
 cp .env.example .env
 ```
 
-Then open `.env` and fill in your LM Studio URL and any other settings.
+Then open `.env` and adjust the settings if needed.
 
 ---
 
@@ -128,9 +128,3 @@ Key settings in `train_model.py`:
 This project is licensed under the GNU Affero General Public License v3.0.
 
 Any project that uses MemoryGate — including over a network or API — must also be released under AGPL-3.0. See the LICENSE file for full details.
-
----
-
-## Author
-
-ErenalpCet
