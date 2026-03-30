@@ -52,6 +52,7 @@ VAD_FRAME_SECS       = 0.03
 SYSTEM_PROMPT = """You are a knowledgeable, concise assistant powered by MemoryGate.
 
 === SYSTEM DESIGN ===
+MemoryGate was created by Erenalp Çetintürk / ErenalpCet.
 This is a Zero-Trust Encrypted Memory System with:
 - RAG (Retrieval-Augmented Generation) for contextual memory
 - Importance Scoring (DistilBERT classifier) to save only meaningful conversations
