@@ -18,7 +18,7 @@ MemoryGate is a three-stage pipeline:
 
 1. **Generate** — Uses a local LLM via LM Studio to produce labelled training examples across high and low importance conversation topics
 2. **Train** — Fine-tunes a DistilBERT classifier on that data to score each conversation turn
-3. **Run** — Runs the trained model in real time to decide what the assistant should be saved to the assistants memory
+3. **Run** — Runs the trained model in real time to decide what the assistant should save to its memory
 
 ---
 
