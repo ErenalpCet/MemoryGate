@@ -3,6 +3,7 @@
 > A lightweight DistilBERT classifier that decides what an AI assistant should remember — and what it should forget.
 
 > Warning: In LM Studio do not use a reasoning model. Reasoning models may break the system.
+
 > Tested and verified on Ubuntu.
 
 <img width="1008" height="476" alt="MemoryGate in action" src="https://github.com/user-attachments/assets/3dbec8b9-d578-4d90-8fb0-524ce57a24a4" />
