@@ -1,8 +1,8 @@
 # MemoryGate
 
-<img width="1008" height="476" alt="image" src="https://github.com/user-attachments/assets/3dbec8b9-d578-4d90-8fb0-524ce57a24a4" />
+> A lightweight DistilBERT classifier that decides what an AI assistant should remember — and what it should forget.
 
-A lightweight DistilBERT classifier that decides what an AI assistant should remember — and what it should forget.
+<img width="1008" height="476" alt="MemoryGate in action" src="https://github.com/user-attachments/assets/3dbec8b9-d578-4d90-8fb0-524ce57a24a4" />
 
 Most AI assistants treat all conversation turns equally. MemoryGate filters them by importance, so only meaningful information gets stored in long-term memory — things like medical details, deadlines, passwords, and personal events — while casual small talk and trivia are quietly discarded.
 
@@ -20,7 +20,7 @@ MemoryGate is a three-stage pipeline:
 
 ## What Counts as Important
 
-High importance (label = 1):
+**High importance (label = 1)**
 - Deaths, grief, family emergencies, personal trauma
 - Passwords, API keys, PINs, access tokens
 - Medical diagnoses, prescriptions, allergies, surgery dates
@@ -28,7 +28,7 @@ High importance (label = 1):
 - Financial decisions, bank details, tax deadlines
 - Project deadlines, stakeholder agreements, production credentials
 
-Low importance (label = 0):
+**Low importance (label = 0)**
 - Casual greetings and small talk
 - General trivia and history facts
 - Creative requests like jokes or poems
@@ -39,7 +39,7 @@ Low importance (label = 0):
 
 ## Requirements
 
-- Python 3.9 or higher
+- Python 3.10 (via Anaconda recommended)
 - A CUDA-capable GPU is recommended for training (CPU fallback is supported)
 - LM Studio running locally with a model loaded (only needed for data generation)
 
@@ -50,7 +50,7 @@ Low importance (label = 0):
 Clone the repository:
 
 ```
-git clone https://github.com/your-username/MemoryGate.git
+git clone https://github.com/ErenalpCet/MemoryGate.git
 cd MemoryGate
 ```
 
@@ -126,11 +126,13 @@ MemoryGate/
 
 Key settings in `train_model.py`:
 
-- `model_name` — base model, default is distilbert-base-uncased
-- `batch_size` — adjust based on your available VRAM
-- `epochs` — default is 6
-- `importance_threshold` — deployment threshold, default is 0.60
-- `use_amp` — mixed precision training, recommended for CUDA
+| Setting | Default | Description |
+| --- | --- | --- |
+| `model_name` | distilbert-base-uncased | Base transformer model |
+| `batch_size` | 32 | Adjust based on available VRAM |
+| `epochs` | 6 | Training epochs |
+| `importance_threshold` | 0.60 | Deployment classification threshold |
+| `use_amp` | True | Mixed precision, recommended for CUDA |
 
 ---
 
@@ -144,4 +146,4 @@ Any project that uses MemoryGate — including over a network or API — must al
 
 ## Author
 
-ErenalpCet / Erenalp Çetintürk
+**ErenalpCet** — Erenalp Çetintürk
