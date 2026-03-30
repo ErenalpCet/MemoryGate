@@ -52,6 +52,13 @@ git clone https://github.com/your-username/MemoryGate.git
 cd MemoryGate
 ```
 
+Create and activate a Python 3.10 environment with Anaconda:
+
+```
+conda create -n memorygate python=3.10
+conda activate memorygate
+```
+
 Install dependencies:
 
 ```
@@ -135,4 +142,4 @@ Any project that uses MemoryGate — including over a network or API — must al
 
 ## Author
 
-ErenalpCet / Erenalp Çetintürk
+ErenalpCet
