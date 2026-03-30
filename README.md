@@ -135,4 +135,4 @@ Any project that uses MemoryGate — including over a network or API — must al
 
 ## Author
 
-ErenalpCet
+ErenalpCet / Erenalp Çetintürk
