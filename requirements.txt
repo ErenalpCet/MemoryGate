@@ -1,0 +1,31 @@
+--index-url https://download.pytorch.org/whl/cu126
+torch
+torchvision
+torchaudio
+
+# Core ML
+transformers
+sentence-transformers
+scikit-learn
+numpy
+
+# Data & storage
+chromadb
+
+# LLM client
+openai
+
+# Web search
+ddgs
+
+# Encryption
+cryptography
+
+# Voice I/O
+sounddevice
+kokoro
+
+# Environment & UI
+python-dotenv
+rich
+tqdm
