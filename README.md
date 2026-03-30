@@ -58,6 +58,8 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+This will automatically install PyTorch with CUDA 12.6 support. If you are on CPU only, replace the `--index-url` line in `requirements.txt` with the standard PyPI version.
+
 Set up your environment variables by copying the example file:
 
 ```
