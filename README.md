@@ -2,6 +2,8 @@
 
 > A lightweight DistilBERT classifier that decides what an AI assistant should remember — and what it should forget.
 
+> Warning: In LM Studio do not use a reasoning model. Reasoning models may break the system.
+
 <img width="1008" height="476" alt="MemoryGate in action" src="https://github.com/user-attachments/assets/3dbec8b9-d578-4d90-8fb0-524ce57a24a4" />
 
 Most AI assistants treat all conversation turns equally. MemoryGate filters them by importance, so only meaningful information gets stored in long-term memory — things like medical details, deadlines, passwords, and personal events — while casual small talk and trivia are quietly discarded.
@@ -14,7 +16,7 @@ MemoryGate is a three-stage pipeline:
 
 1. **Generate** — Uses a local LLM via LM Studio to produce labelled training examples across high and low importance conversation topics
 2. **Train** — Fine-tunes a DistilBERT classifier on that data to score each conversation turn
-3. **Run** — Applies the trained model in real time to decide what the assistant should commit to memory
+3. **Run** — Runs the trained model in real time to decide what the assistant should be saved to the assistants memory
 
 ---
 
