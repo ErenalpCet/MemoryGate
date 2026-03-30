@@ -41,7 +41,7 @@ MemoryGate is a three-stage pipeline:
 
 - Python 3.10 (via Anaconda recommended)
 - A CUDA-capable GPU is recommended for training (CPU fallback is supported)
-- LM Studio running locally with a model loaded (only needed for data generation)
+- LM Studio running locally with a model loaded (always needed for run_memory.py and generate_training_data.py)
 
 ---
 
