@@ -1,5 +1,7 @@
 # MemoryGate
 
+<img width="1008" height="476" alt="image" src="https://github.com/user-attachments/assets/3dbec8b9-d578-4d90-8fb0-524ce57a24a4" />
+
 A lightweight DistilBERT classifier that decides what an AI assistant should remember — and what it should forget.
 
 Most AI assistants treat all conversation turns equally. MemoryGate filters them by importance, so only meaningful information gets stored in long-term memory — things like medical details, deadlines, passwords, and personal events — while casual small talk and trivia are quietly discarded.
