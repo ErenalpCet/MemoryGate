@@ -128,3 +128,9 @@ Key settings in `train_model.py`:
 This project is licensed under the GNU Affero General Public License v3.0.
 
 Any project that uses MemoryGate — including over a network or API — must also be released under AGPL-3.0. See the LICENSE file for full details.
+
+---
+
+## Author
+
+ErenalpCet
