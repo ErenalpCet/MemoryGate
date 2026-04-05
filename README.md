@@ -2,23 +2,47 @@
 
 > A lightweight DistilBERT classifier that decides what an AI assistant should remember — and what it should forget.
 
-> Warning: In LM Studio do not use a reasoning model. Reasoning models may break the system.
+Most AI assistants treat every conversation turn equally. MemoryGate filters them by importance, so only meaningful information gets stored in long-term memory — medical details, deadlines, passwords, personal events — while casual small talk is quietly discarded. All memories are encrypted on disk; nothing leaves your machine.
 
-> Tested and verified on Ubuntu.
+> **Warning:** Do not use a reasoning model in LM Studio. Reasoning models may break the tool-calling system.
+
+> Tested and verified on Ubuntu. Windows users see the [platform notes](#platform-notes) below.
 
 <img width="1008" height="476" alt="MemoryGate in action" src="https://github.com/user-attachments/assets/3dbec8b9-d578-4d90-8fb0-524ce57a24a4" />
-
-Most AI assistants treat all conversation turns equally. MemoryGate filters them by importance, so only meaningful information gets stored in long-term memory — things like medical details, deadlines, passwords, and personal events — while casual small talk and trivia are quietly discarded.
 
 ---
 
 ## How It Works
 
-MemoryGate is a three-stage pipeline:
+MemoryGate runs as a three-stage pipeline.
 
-1. **Generate** — Uses a local LLM via LM Studio to produce labelled training examples across high and low importance conversation topics
-2. **Train** — Fine-tunes a DistilBERT classifier on that data to score each conversation turn
-3. **Run** — Runs the trained model in real time to decide what the assistant should save to its memory
+**Stage 1 — Generate:** A local LLM (via LM Studio) produces labelled training examples covering high- and low-importance conversation topics.
+
+**Stage 2 — Train:** A DistilBERT classifier is fine-tuned on that data to score each conversation turn.
+
+**Stage 3 — Run:** The trained model runs in real time. Each assistant reply is scored; only important turns are saved to the encrypted RAG memory store.
+
+```
+Build pipeline (one-time)
+─────────────────────────────────────────────────────────────
+  LM Studio  ──►  generate_training_data.py  ──►  train_model.py
+                         (.jsonl)                  (importance_model/)
+
+Runtime (every conversation)
+─────────────────────────────────────────────────────────────
+  User input
+      │
+      ▼
+  LM Studio  ◄──►  Web search (DuckDuckGo)
+      │
+      ▼
+  Response
+      │
+      ▼
+  Importance scorer  ──► (if score ≥ threshold) ──► RAG memory
+      │                                                  │
+      └──────────── retrieved context ◄──────────────────┘
+```
 
 ---
 
@@ -43,71 +67,80 @@ MemoryGate is a three-stage pipeline:
 
 ## Requirements
 
-- Python 3.10 (via Anaconda recommended)
-- A CUDA-capable GPU is recommended for training (CPU fallback is supported)
-- LM Studio running locally with a model loaded (always needed for run_memory.py and generate_training_data.py)
+- Python 3.10 (Anaconda recommended)
+- LM Studio running locally with a non-reasoning model loaded
+- A CUDA-capable GPU is recommended for training; CPU fallback is supported for inference
 
 ---
 
 ## Installation
 
-Clone the repository:
+### 1. Clone the repository
 
-```
+```bash
 git clone https://github.com/ErenalpCet/MemoryGate.git
 cd MemoryGate
 ```
 
-Create and activate a Python 3.10 environment with Anaconda:
+### 2. Create a Python 3.10 environment
 
-```
+```bash
 conda create -n memorygate python=3.10
 conda activate memorygate
 ```
 
-Install dependencies:
+### 3. Install dependencies
 
-```
+```bash
 pip install -r requirements.txt
 ```
 
-This will automatically install PyTorch with CUDA 12.6 support. If you are on CPU only, replace the `--index-url` line in `requirements.txt` with the standard PyPI version.
+This installs PyTorch with CUDA 12.6 support. If you are on CPU only, remove the `--extra-index-url` line from `requirements.txt` before running.
 
-Set up your environment variables by copying the example file:
+### 4. Set up environment variables
 
-```
+```bash
 cp .env.example .env
 ```
 
-Then open `.env` and adjust the settings if needed.
+Open `.env` and adjust the LM Studio URL if you changed the default port.
+
+### 5. Set up LM Studio
+
+1. Download and install [LM Studio](https://lmstudio.ai).
+2. Download any instruction-tuned model (e.g. Mistral 7B Instruct, LLaMA 3 8B Instruct). **Do not use a reasoning model** — these break the tool-calling pipeline.
+3. Go to the **Local Server** tab in LM Studio and click **Start Server**. The default address is `http://localhost:1234`.
+4. Load your chosen model into the server.
 
 ---
 
 ## Usage
 
-### Step 1 — Generate Training Data
+### Step 1 — Generate training data
 
-Make sure LM Studio is running with a model loaded, then run:
+With LM Studio running and a model loaded:
 
-```
+```bash
 python generate_training_data.py
 ```
 
-This produces `conversation_data.jsonl` with balanced high and low importance examples.
+This produces `conversation_data.jsonl` with balanced high- and low-importance examples. Generation targets 800 examples per class by default and resumes from where it left off if interrupted.
 
-### Step 2 — Train the Model
+### Step 2 — Train the model
 
-```
+```bash
 python train_model.py
 ```
 
-The best checkpoint is saved to `./importance_model/` based on validation loss.
+The best checkpoint (by validation loss) is saved to `./importance_model/`. Training takes a few minutes on a GPU and up to an hour on CPU.
 
-### Step 3 — Run the Memory Filter
+### Step 3 — Run the memory filter
 
-```
+```bash
 python run_memory.py
 ```
+
+On first launch you will be prompted to create a master password. This password encrypts all stored memories and your identity profile. **There is no password recovery — keep it safe.**
 
 ---
 
@@ -117,9 +150,10 @@ python run_memory.py
 MemoryGate/
 ├── generate_training_data.py   # Synthetic data generation via LM Studio
 ├── train_model.py              # DistilBERT fine-tuning pipeline
-├── run_memory.py               # Runtime memory filtering
-├── conversation_data.jsonl     # Generated training data (git ignored)
-├── importance_model/           # Saved model weights (git ignored)
+├── run_memory.py               # Runtime memory filtering and chat loop
+├── conversation_data.jsonl     # Generated training data (git-ignored)
+├── importance_model/           # Saved model weights (git-ignored)
+├── rag_memory_db/              # ChromaDB vector store (git-ignored)
 ├── .env.example                # Environment variable template
 └── requirements.txt
 ```
@@ -132,19 +166,45 @@ Key settings in `train_model.py`:
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `model_name` | distilbert-base-uncased | Base transformer model |
-| `batch_size` | 32 | Adjust based on available VRAM |
-| `epochs` | 6 | Training epochs |
-| `importance_threshold` | 0.60 | Deployment classification threshold |
-| `use_amp` | True | Mixed precision, recommended for CUDA |
+| `model_name` | `distilbert-base-uncased` | Base transformer model |
+| `batch_size` | `32` | Reduce if you run out of VRAM |
+| `epochs` | `6` | Training epochs |
+| `importance_threshold` | `0.60` | Classification threshold at training time |
+| `use_amp` | `True` | Mixed precision — recommended for CUDA |
+
+The threshold baked into the saved `config.json` is used at inference time by `run_memory.py`.
+
+---
+
+## Platform Notes
+
+**Ubuntu / Linux** — fully supported and tested.
+
+**macOS** — should work but is untested. MPS (Apple Silicon GPU) is not explicitly configured; the code falls back to CPU.
+
+**Windows** — the code is compatible but there are two known friction points:
+- `sounddevice` may require a manual PortAudio installation.
+- `kokoro` TTS may need additional native library dependencies. Voice features are optional — the text-based chat path works without them.
+
+---
+
+## Troubleshooting
+
+**"Cannot reach LM Studio"** — Make sure the Local Server is running in LM Studio (not just the chat interface) and that a model is loaded into it. Check that `LM_STUDIO_BASE_URL` in your `.env` matches the address shown in LM Studio.
+
+**"Model not found in ./importance_model"** — You need to run `train_model.py` before `run_memory.py`. The model directory is created during training.
+
+**Generation is slow or produces empty batches** — LM Studio may be overloaded or using a model that is too large for your hardware. Try a smaller model, or reduce `BATCH_SIZE` in `generate_training_data.py`.
+
+**Training runs out of memory** — Reduce `batch_size` in `train_model.py` (try 8 or 16). If you are on CPU, also set `use_amp` to `False`.
+
+**Voice input is not transcribing correctly** — Whisper large-v3-turbo requires around 4 GB of VRAM. If your GPU is smaller, swap `WHISPER_MODEL` in `run_memory.py` to `openai/whisper-small` or `openai/whisper-base`.
 
 ---
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0.
-
-Any project that uses MemoryGate — including over a network or API — must also be released under AGPL-3.0. See the LICENSE file for full details.
+Licensed under the GNU Affero General Public License v3.0. Any project that uses MemoryGate — including over a network or API — must also be released under AGPL-3.0. See [LICENSE](LICENSE) for full details.
 
 ---
 
