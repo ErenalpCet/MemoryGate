@@ -104,6 +104,16 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 console = Console(force_terminal=True)
 
+# ====================== PRE-COMPILED REGEX (performance) ======================
+# Compiled once at module load rather than on every TTS call.
+_TTS_CLEANUP_RE: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\[.*?\]"),                  ""),
+    (re.compile(r"\*{1,3}[^\n*]*?\*{1,3}"),  ""),
+    (re.compile(r"`{1,3}[^\n`]*?`{1,3}"),    ""),
+    (re.compile(r"#{1,6}\s+"),               ""),
+    (re.compile(r"^>\s+", re.MULTILINE),     ""),
+]
+
 
 # ====================== WEB SEARCHER ======================
 class WebSearcher:
@@ -290,7 +300,9 @@ class ImportanceScorer:
         else:
             text = f"USER: {user_input} ASSISTANT: {assistant_output}"
 
-        enc = self.tokenizer(text, max_length=512, padding="max_length", truncation=True, return_tensors="pt")
+        # FIX (performance): no padding — batch size is always 1 at inference time,
+        # so padding to max_length wastes compute on every single scoring call.
+        enc = self.tokenizer(text, max_length=512, truncation=True, return_tensors="pt")
         ids = enc["input_ids"].to(self.device, non_blocking=True)
         mask = enc["attention_mask"].to(self.device, non_blocking=True)
 
@@ -577,13 +589,20 @@ class LMStudioClient:
         self._connect()
 
     def _connect(self):
+        # FIX (robustness): surface connection problems immediately at startup
+        # rather than letting them surface as a cryptic error mid-conversation.
         try:
             models = self.client.models.list()
             if models.data:
                 self.model = models.data[0].id
                 console.print(f"[green]LM Studio connected[/green] model=[cyan]{self.model}[/cyan]")
-        except Exception:
-            pass
+            else:
+                console.print("[yellow]⚠ LM Studio is running but no model is loaded.[/yellow]")
+                console.print("[dim]Load a model in LM Studio before chatting.[/dim]")
+        except Exception as exc:
+            console.print(f"[red]⚠ Cannot reach LM Studio at {LM_STUDIO_BASE_URL}[/red]")
+            console.print(f"[dim]{exc}[/dim]")
+            console.print("[dim]Start LM Studio, load a model, and make sure the server is on.[/dim]")
 
     def chat(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 1024) -> str:
         if not self.model:
@@ -742,11 +761,11 @@ class VoiceSpeaker:
         if self._pipeline is None:
             return
 
-        clean = re.sub(r"\[.*?\]", "", text)
-        clean = re.sub(r"\*{1,3}[^\n*]*?\*{1,3}", "", clean)
-        clean = re.sub(r"`{1,3}[^\n`]*?`{1,3}", "", clean)
-        clean = re.sub(r"#{1,6}\s+", "", clean)
-        clean = re.sub(r"^>\s+", "", clean, flags=re.MULTILINE)
+        # FIX (performance): use module-level pre-compiled patterns instead of
+        # recompiling the same 5 regexes on every single TTS call.
+        clean = text
+        for pattern, repl in _TTS_CLEANUP_RE:
+            clean = pattern.sub(repl, clean)
         clean = clean.replace("\u2013", "-").replace("\u2014", "-")
         clean = clean.replace("\u2018", "'").replace("\u2019", "'")
         clean = clean.replace("\u201c", '"').replace("\u201d", '"')
@@ -819,12 +838,18 @@ def run_chat():
         create_setup_token(password)
         console.print("[green]Master password set successfully![/green]")
     else:
+        # FIX (robustness): handle Ctrl-C during the password prompt so users
+        # are not permanently stuck if they cannot remember the password.
         while True:
-            password = secure_password()
+            try:
+                password = secure_password()
+            except (KeyboardInterrupt, EOFError):
+                console.print("\n[yellow]Login cancelled.[/yellow]")
+                sys.exit(0)
             if verify_password(password):
                 console.print("[green]Password accepted[/green]")
                 break
-            console.print("[red]Wrong password[/red]")
+            console.print("[red]Wrong password. Try again, or press Ctrl-C to exit.[/red]")
 
     encryptor = MemoryEncryptor(password)
     scorer    = ImportanceScorer()
@@ -859,7 +884,15 @@ def run_chat():
 
     while True:
         if voice_mode:
-            user_input = mic.listen()
+            # FIX (robustness): a mic/audio error should not crash the whole session.
+            # Fall back to text input and let the user decide what to do.
+            try:
+                user_input = mic.listen()
+            except Exception as exc:
+                console.print(f"[yellow]Voice input error: {exc}[/yellow]")
+                console.print("[dim]Falling back to text input. Use /voice to re-enable.[/dim]")
+                voice_mode = False
+                continue
             if not user_input:
                 continue
         else:
@@ -1060,8 +1093,13 @@ def run_chat():
             console.print(f"[red]LM Studio error: {e}[/red]")
             continue
 
+        # FIX (bug): always update last_search_data, even when search_data is None.
+        # Previously, if a web search turn was followed by a normal turn and then
+        # /save was used, the old search results would be incorrectly attached to
+        # the new (unrelated) conversation.
+        last_search_data = search_data
+
         if search_data:
-            last_search_data = search_data
             console.print(Panel(
                 WebSearcher.format_for_display(search_data),
                 title="Web Search Results (use /save to keep)",
