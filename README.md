@@ -4,7 +4,7 @@
 
 Most AI assistants treat every conversation turn equally. MemoryGate filters them by importance, so only meaningful information gets stored in long-term memory — medical details, deadlines, passwords, personal events — while casual small talk is quietly discarded. All memories are encrypted on disk; nothing leaves your machine.
 
-> **Warning:** Do not use a reasoning model in LM Studio. Reasoning models may break the tool-calling system.
+> **Warning:** Do not use a reasoning model in LM Studio. Reasoning models may break the system.
 
 > Tested and verified on Ubuntu. Windows users see the [platform notes](#platform-notes) below.
 
