@@ -49,6 +49,11 @@ VAD_MIN_SPEECH_SECS  = 0.3
 VAD_PRE_ROLL_SECS    = 0.5
 VAD_FRAME_SECS       = 0.03
 
+# FIX: Maximum chat history turns to keep to avoid context window overflow.
+# Each turn = 2 messages (user + assistant). 20 turns = 40 messages.
+# Adjust down if your LM Studio model has a small context window (e.g. 4k).
+MAX_HISTORY_TURNS = 20
+
 SYSTEM_PROMPT = """You are a knowledgeable, concise assistant powered by MemoryGate.
 
 === SYSTEM DESIGN ===
@@ -105,7 +110,6 @@ if torch.cuda.is_available():
 console = Console(force_terminal=True)
 
 # ====================== PRE-COMPILED REGEX (performance) ======================
-# Compiled once at module load rather than on every TTS call.
 _TTS_CLEANUP_RE: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\[.*?\]"),                  ""),
     (re.compile(r"\*{1,3}[^\n*]*?\*{1,3}"),  ""),
@@ -117,11 +121,6 @@ _TTS_CLEANUP_RE: list[tuple[re.Pattern, str]] = [
 
 # ====================== WEB SEARCHER ======================
 class WebSearcher:
-    """
-    Free, no-API-key web search using DuckDuckGo via the duckduckgo-search library.
-    Install:  pip install ddgs
-    """
-
     def search(self, query: str, max_results: int = 5) -> dict:
         try:
             from ddgs import DDGS
@@ -265,11 +264,13 @@ class ImportanceScorer:
         self.device = DEVICE
         self.model = None
         self.tokenizer = None
-        self.threshold = 0.65
+        # FIX: removed hardcoded 0.65 default — threshold is always read from
+        # config.json in _load(), so a stale default here was misleading.
+        self.threshold: float = 0.60
         self._load()
 
     def _load(self):
-        cfg_path = os.path.join(self.model_dir, "config.json")
+        cfg_path   = os.path.join(self.model_dir, "config.json")
         model_path = os.path.join(self.model_dir, "best_model.pt")
         if not os.path.exists(cfg_path) or not os.path.exists(model_path):
             raise RuntimeError(f"Model not found in {self.model_dir}")
@@ -277,42 +278,54 @@ class ImportanceScorer:
         with open(cfg_path) as f:
             cfg = json.load(f)
 
-        self.threshold = cfg.get("importance_threshold", 0.65)
-        model_name = cfg.get("model_name", "distilbert-base-uncased")
-        dropout = cfg.get("dropout", 0.3)
+        # Threshold always comes from the saved config — never from a hardcoded default.
+        self.threshold = cfg.get("importance_threshold", 0.60)
+        model_name     = cfg.get("model_name", "distilbert-base-uncased")
+        dropout        = cfg.get("dropout", 0.3)
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
-        self.model = ImportanceClassifier(model_name, dropout)
-        self.model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))
+        self.model     = ImportanceClassifier(model_name, dropout)
+        self.model.load_state_dict(
+            torch.load(model_path, map_location=self.device, weights_only=True)
+        )
         self.model.to(self.device).eval()
 
         if hasattr(torch, "compile") and torch.cuda.is_available():
             self.model = torch.compile(self.model)
 
-        console.print(f"[green]Importance classifier loaded[/green] threshold=[yellow]{self.threshold:.0%}[/yellow]")
+        console.print(
+            f"[green]Importance classifier loaded[/green] "
+            f"threshold=[yellow]{self.threshold:.0%}[/yellow]"
+        )
 
     @torch.no_grad()
-    def score(self, user_input: str, assistant_output: str, chat_history: list | None = None) -> float:
+    def score(
+        self,
+        user_input: str,
+        assistant_output: str,
+        chat_history: list | None = None,
+    ) -> float:
         if chat_history and len(chat_history) >= 4:
-            recent = chat_history[-6:]
-            context = "\n".join(f"{'USER' if t['role'] == 'user' else 'ASSISTANT'}: {t['content']}" for t in recent)
+            recent  = chat_history[-6:]
+            context = "\n".join(
+                f"{'USER' if t['role'] == 'user' else 'ASSISTANT'}: {t['content']}"
+                for t in recent
+            )
             text = f"{context}\nUSER: {user_input} ASSISTANT: {assistant_output}"
         else:
             text = f"USER: {user_input} ASSISTANT: {assistant_output}"
 
-        # FIX (performance): no padding — batch size is always 1 at inference time,
-        # so padding to max_length wastes compute on every single scoring call.
-        enc = self.tokenizer(text, max_length=512, truncation=True, return_tensors="pt")
-        ids = enc["input_ids"].to(self.device, non_blocking=True)
+        enc  = self.tokenizer(text, max_length=512, truncation=True, return_tensors="pt")
+        ids  = enc["input_ids"].to(self.device, non_blocking=True)
         mask = enc["attention_mask"].to(self.device, non_blocking=True)
 
         if torch.cuda.is_available():
             with torch.autocast(device_type="cuda", dtype=torch.float16):
                 logits = self.model(ids, mask)
-                score = torch.sigmoid(logits).item()
+                score  = torch.sigmoid(logits).item()
         else:
             logits = self.model(ids, mask)
-            score = torch.sigmoid(logits).item()
+            score  = torch.sigmoid(logits).item()
         return round(score, 4)
 
     def is_important(self, score: float) -> bool:
@@ -325,11 +338,17 @@ class RAGMemory:
 
     def __init__(self, password: str):
         self.encryptor = MemoryEncryptor(password)
-        self.embedder = SentenceTransformer(EMBEDDER_MODEL, device=str(DEVICE), model_kwargs={
-            "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32})
-        self.client = chromadb.PersistentClient(path=RAG_DB_PATH)
+        self.embedder  = SentenceTransformer(
+            EMBEDDER_MODEL,
+            device=str(DEVICE),
+            model_kwargs={
+                "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32
+            },
+        )
+        self.client     = chromadb.PersistentClient(path=RAG_DB_PATH)
         self.collection = self.client.get_or_create_collection(
-            name=self.COLLECTION, metadata={"hnsw:space": "cosine"})
+            name=self.COLLECTION, metadata={"hnsw:space": "cosine"}
+        )
         console.print(f"[green]RAG memory ready[/green] ({self.collection.count()} memories)")
 
     def save(
@@ -348,23 +367,22 @@ class RAGMemory:
                 r.get("snippet", "")[:200] for r in search_data["results"][:5]
             )
             document_parts.append(f"SEARCH_CONTEXT: {snippets}")
-        document = "\n".join(document_parts)
-
+        document  = "\n".join(document_parts)
         embedding = self.embedder.encode(document, normalize_embeddings=True).tolist()
 
         metadata: dict = {
-            "user_input":        self.encryptor.encrypt(user_input[:600]),
-            "assistant_output":  self.encryptor.encrypt(assistant_output[:600]),
-            "importance_score":  score,
-            "timestamp":         datetime.now(timezone.utc).isoformat(),
-            "manual_save":       manual,
-            "has_search":        False,
+            "user_input":       self.encryptor.encrypt(user_input[:600]),
+            "assistant_output": self.encryptor.encrypt(assistant_output[:600]),
+            "importance_score": score,
+            "timestamp":        datetime.now(timezone.utc).isoformat(),
+            "manual_save":      manual,
+            "has_search":       False,
         }
 
         if search_data:
             raw_json = json.dumps(search_data, ensure_ascii=False)[:3000]
-            metadata["search_data"] = self.encryptor.encrypt(raw_json)
-            metadata["has_search"] = True
+            metadata["search_data"]  = self.encryptor.encrypt(raw_json)
+            metadata["has_search"]   = True
             metadata["search_query"] = search_data.get("query", "")[:120]
 
         self.collection.add(
@@ -395,17 +413,24 @@ class RAGMemory:
 
         return out
 
-    def retrieve(self, query: str, top_k: int = 4, min_similarity: float = 0.25) -> list[dict]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 4,
+        min_similarity: float = 0.25,
+    ) -> list[dict]:
         if self.collection.count() == 0:
             return []
-        q_emb = self.embedder.encode(query, normalize_embeddings=True).tolist()
+        q_emb   = self.embedder.encode(query, normalize_embeddings=True).tolist()
         results = self.collection.query(
             query_embeddings=[q_emb],
             n_results=min(top_k, self.collection.count()),
         )
         memories = []
         for doc, meta, dist in zip(
-            results["documents"][0], results["metadatas"][0], results["distances"][0]
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
         ):
             sim = round(1.0 - dist, 4)
             if sim >= min_similarity:
@@ -489,21 +514,21 @@ def get_current_datetime() -> str:
 # ====================== VOICE ======================
 class VoiceInput:
     def __init__(self):
-        self.device_id = None
+        self.device_id  = None
         self.sample_rate = 16000
-        self._whisper = None
+        self._whisper   = None
 
     def pick_microphone(self):
-        devices = sd.query_devices()
+        devices    = sd.query_devices()
         input_devs = [(i, d) for i, d in enumerate(devices) if d["max_input_channels"] > 0]
         if not input_devs:
             console.print("[red]No microphone found.[/red]")
             return
         for i, (_, dev) in enumerate(input_devs):
             console.print(f"{i}: {dev['name']}")
-        idx = int(Prompt.ask("[bold yellow]Choose microphone number[/bold yellow]", default="0"))
-        self.device_id = input_devs[idx][0]
-        self.sample_rate = int(devices[self.device_id]["default_samplerate"])
+        idx              = int(Prompt.ask("[bold yellow]Choose microphone number[/bold yellow]", default="0"))
+        self.device_id   = input_devs[idx][0]
+        self.sample_rate = int(sd.query_devices()[self.device_id]["default_samplerate"])
         console.print("[green]Microphone selected[/green]")
         console.print("[dim]Loading Whisper model ...[/dim]")
         self._load_whisper()
@@ -529,14 +554,14 @@ class VoiceInput:
         self._load_whisper()
         console.print("[dim]Listening ...[/dim]")
 
-        frame_samples = int(self.sample_rate * VAD_FRAME_SECS)
-        pre_roll_frames = int(VAD_PRE_ROLL_SECS / VAD_FRAME_SECS)
+        frame_samples        = int(self.sample_rate * VAD_FRAME_SECS)
+        pre_roll_frames      = int(VAD_PRE_ROLL_SECS / VAD_FRAME_SECS)
         silence_frames_needed = int(VAD_SILENCE_SECS / VAD_FRAME_SECS)
-        min_speech_frames = int(VAD_MIN_SPEECH_SECS / VAD_FRAME_SECS)
+        min_speech_frames    = int(VAD_MIN_SPEECH_SECS / VAD_FRAME_SECS)
 
-        ring = deque(maxlen=pre_roll_frames)
+        ring          = deque(maxlen=pre_roll_frames)
         speech_frames: list[np.ndarray] = []
-        speaking = False
+        speaking      = False
         silence_count = 0
 
         with sd.InputStream(
@@ -546,9 +571,9 @@ class VoiceInput:
             device=self.device_id,
         ) as stream:
             while True:
-                frame, _ = stream.read(frame_samples)
-                frame_1d = frame[:, 0] if frame.ndim > 1 else frame
-                energy = float(np.sqrt(np.mean(frame_1d ** 2)))
+                frame, _  = stream.read(frame_samples)
+                frame_1d  = frame[:, 0] if frame.ndim > 1 else frame
+                energy    = float(np.sqrt(np.mean(frame_1d ** 2)))
 
                 if not speaking:
                     ring.append(frame_1d.copy())
@@ -570,7 +595,7 @@ class VoiceInput:
         if len(speech_frames) < min_speech_frames:
             return ""
 
-        audio = np.concatenate(speech_frames).astype(np.float32)
+        audio  = np.concatenate(speech_frames).astype(np.float32)
         result = self._whisper(
             {"sampling_rate": self.sample_rate, "raw": audio},
             return_timestamps=False,
@@ -589,8 +614,6 @@ class LMStudioClient:
         self._connect()
 
     def _connect(self):
-        # FIX (robustness): surface connection problems immediately at startup
-        # rather than letting them surface as a cryptic error mid-conversation.
         try:
             models = self.client.models.list()
             if models.data:
@@ -604,7 +627,12 @@ class LMStudioClient:
             console.print(f"[dim]{exc}[/dim]")
             console.print("[dim]Start LM Studio, load a model, and make sure the server is on.[/dim]")
 
-    def chat(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 1024) -> str:
+    def chat(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+    ) -> str:
         if not self.model:
             raise RuntimeError("No model loaded in LM Studio.")
         full_reply = ""
@@ -647,14 +675,18 @@ class LMStudioClient:
             stream=False,
         )
 
-        choice = response.choices[0]
+        choice      = response.choices[0]
         search_data: dict | None = None
 
         if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
             tool_calls = choice.message.tool_calls
 
+            # FIX: added "content": None — the OpenAI spec requires this field on
+            # assistant messages that contain tool_calls; its absence caused API
+            # errors with some LM Studio backends.
             assistant_tool_msg: dict = {
-                "role": "assistant",
+                "role":       "assistant",
+                "content":    None,
                 "tool_calls": [
                     {
                         "id":   tc.id,
@@ -761,8 +793,6 @@ class VoiceSpeaker:
         if self._pipeline is None:
             return
 
-        # FIX (performance): use module-level pre-compiled patterns instead of
-        # recompiling the same 5 regexes on every single TTS call.
         clean = text
         for pattern, repl in _TTS_CLEANUP_RE:
             clean = pattern.sub(repl, clean)
@@ -813,7 +843,7 @@ class VoiceSpeaker:
 
         try:
             audio = np.concatenate(chunks).astype(np.float32)
-            peak = float(np.abs(audio).max())
+            peak  = float(np.abs(audio).max())
             if peak == 0.0:
                 console.print("[yellow]TTS: audio is silent, skipping playback[/yellow]")
                 return
@@ -838,8 +868,6 @@ def run_chat():
         create_setup_token(password)
         console.print("[green]Master password set successfully![/green]")
     else:
-        # FIX (robustness): handle Ctrl-C during the password prompt so users
-        # are not permanently stuck if they cannot remember the password.
         while True:
             try:
                 password = secure_password()
@@ -875,27 +903,34 @@ def run_chat():
 
     show_commands()
 
-    voice_mode = Prompt.ask("[bold yellow]Enable voice input? (y/n)[/bold yellow]", default="n").lower() in ("y", "yes")
+    voice_mode = Prompt.ask(
+        "[bold yellow]Enable voice input? (y/n)[/bold yellow]", default="n"
+    ).lower() in ("y", "yes")
     if voice_mode:
         mic.pick_microphone()
 
-    chat_history: list[dict] = []
+    chat_history: list[dict]  = []
     last_search_data: dict | None = None
 
     while True:
+        user_input: str = ""
+
         if voice_mode:
-            # FIX (robustness): a mic/audio error should not crash the whole session.
-            # Fall back to text input and let the user decide what to do.
+            # FIX: catch mic/audio errors without crashing the session.
+            # The user's pending text input is NOT lost — we fall back to a
+            # text prompt in the same iteration instead of skipping via continue.
             try:
                 user_input = mic.listen()
             except Exception as exc:
                 console.print(f"[yellow]Voice input error: {exc}[/yellow]")
-                console.print("[dim]Falling back to text input. Use /voice to re-enable.[/dim]")
+                console.print(
+                    "[dim]Voice mode disabled. Use /voice to re-enable. "
+                    "Enter your message as text below.[/dim]"
+                )
                 voice_mode = False
-                continue
-            if not user_input:
-                continue
-        else:
+                # Fall through to text input below instead of continue-ing.
+
+        if not voice_mode and not user_input:
             try:
                 user_input = Prompt.ask("[bold green]You[/bold green]").strip()
             except (EOFError, KeyboardInterrupt):
@@ -1061,12 +1096,12 @@ def run_chat():
 
             continue
 
-        # Normal conversation
+        # ── Normal conversation ──────────────────────────────────────────────
         relevant         = memory.retrieve(user_input, top_k=3)
         identity_text    = load_identity(encryptor)
         current_datetime = get_current_datetime()
 
-        system_content = SYSTEM_PROMPT
+        system_content  = SYSTEM_PROMPT
         system_content += f"\n\n=== CURRENT TIME ===\n{current_datetime}\n=== END ===\n"
         if identity_text:
             system_content += f"\n\n=== ABOUT YOU ===\n{identity_text}\n=== END ===\n"
@@ -1093,10 +1128,9 @@ def run_chat():
             console.print(f"[red]LM Studio error: {e}[/red]")
             continue
 
-        # FIX (bug): always update last_search_data, even when search_data is None.
-        # Previously, if a web search turn was followed by a normal turn and then
-        # /save was used, the old search results would be incorrectly attached to
-        # the new (unrelated) conversation.
+        # FIX: always overwrite last_search_data (even with None) so that a
+        # non-search turn following a search turn doesn't incorrectly attach
+        # the old search results when the user runs /save.
         last_search_data = search_data
 
         if search_data:
@@ -1115,13 +1149,20 @@ def run_chat():
             {"role": "user",      "content": user_input},
             {"role": "assistant", "content": assistant_reply},
         ])
-        if len(chat_history) > 40:
-            chat_history = chat_history[-40:]
+
+        # FIX: trim history to MAX_HISTORY_TURNS pairs to avoid blowing the
+        # model's context window. Pairs are trimmed from the oldest end.
+        max_messages = MAX_HISTORY_TURNS * 2
+        if len(chat_history) > max_messages:
+            chat_history = chat_history[-max_messages:]
 
         score     = scorer.score(user_input, assistant_reply, chat_history)
         important = scorer.is_important(score)
 
-        search_hint = " [dim](includes web search — /save to persist results)[/dim]" if search_data else ""
+        search_hint = (
+            " [dim](includes web search — /save to persist results)[/dim]"
+            if search_data else ""
+        )
         if important:
             memory.save(user_input, assistant_reply, score, manual=False)
             console.print(Panel(
