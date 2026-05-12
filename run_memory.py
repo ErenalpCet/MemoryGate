@@ -9,7 +9,11 @@ from collections import deque
 from dotenv import load_dotenv
 import chromadb
 import numpy as np
-import sounddevice as sd
+# BUG 1 FIX: sounddevice was imported unconditionally at the top of the file.
+# This crashed the entire program on machines without it installed, even when
+# voice is never used (the README explicitly marks voice as optional).
+# Fix: replaced with a lazy import helper; sd is only resolved the first time
+# a voice-capable code path actually runs.
 import torch
 import torch.nn as nn
 from cryptography.fernet import Fernet
@@ -49,9 +53,6 @@ VAD_MIN_SPEECH_SECS  = 0.3
 VAD_PRE_ROLL_SECS    = 0.5
 VAD_FRAME_SECS       = 0.03
 
-# FIX: Maximum chat history turns to keep to avoid context window overflow.
-# Each turn = 2 messages (user + assistant). 20 turns = 40 messages.
-# Adjust down if your LM Studio model has a small context window (e.g. 4k).
 MAX_HISTORY_TURNS = 20
 
 SYSTEM_PROMPT = """You are a knowledgeable, concise assistant powered by MemoryGate.
@@ -117,6 +118,28 @@ _TTS_CLEANUP_RE: list[tuple[re.Pattern, str]] = [
     (re.compile(r"#{1,6}\s+"),               ""),
     (re.compile(r"^>\s+", re.MULTILINE),     ""),
 ]
+
+
+# ====================== LAZY SOUNDDEVICE IMPORT (Bug 1 fix) ======================
+_sd = None  # module-level cache
+
+
+def _get_sd():
+    """
+    Return the sounddevice module, importing it on first call.
+    Raises ImportError with a helpful message if not installed.
+    """
+    global _sd
+    if _sd is None:
+        try:
+            import sounddevice as sd_module
+            _sd = sd_module
+        except ImportError as exc:
+            raise ImportError(
+                "sounddevice is not installed. Voice features are unavailable. "
+                "Install it with: pip install sounddevice"
+            ) from exc
+    return _sd
 
 
 # ====================== WEB SEARCHER ======================
@@ -264,8 +287,6 @@ class ImportanceScorer:
         self.device = DEVICE
         self.model = None
         self.tokenizer = None
-        # FIX: removed hardcoded 0.65 default — threshold is always read from
-        # config.json in _load(), so a stale default here was misleading.
         self.threshold: float = 0.60
         self._load()
 
@@ -278,7 +299,6 @@ class ImportanceScorer:
         with open(cfg_path) as f:
             cfg = json.load(f)
 
-        # Threshold always comes from the saved config — never from a hardcoded default.
         self.threshold = cfg.get("importance_threshold", 0.60)
         model_name     = cfg.get("model_name", "distilbert-base-uncased")
         dropout        = cfg.get("dropout", 0.3)
@@ -519,6 +539,8 @@ class VoiceInput:
         self._whisper   = None
 
     def pick_microphone(self):
+        # Bug 1 fix: use lazy import instead of module-level sd
+        sd = _get_sd()
         devices    = sd.query_devices()
         input_devs = [(i, d) for i, d in enumerate(devices) if d["max_input_channels"] > 0]
         if not input_devs:
@@ -552,6 +574,8 @@ class VoiceInput:
         if self.device_id is None:
             return ""
         self._load_whisper()
+        # Bug 1 fix: use lazy import
+        sd = _get_sd()
         console.print("[dim]Listening ...[/dim]")
 
         frame_samples        = int(self.sample_rate * VAD_FRAME_SECS)
@@ -681,9 +705,6 @@ class LMStudioClient:
         if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
             tool_calls = choice.message.tool_calls
 
-            # FIX: added "content": None — the OpenAI spec requires this field on
-            # assistant messages that contain tool_calls; its absence caused API
-            # errors with some LM Studio backends.
             assistant_tool_msg: dict = {
                 "role":       "assistant",
                 "content":    None,
@@ -732,6 +753,21 @@ class LMStudioClient:
                         "content":      json.dumps(search_data, ensure_ascii=False),
                         "tool_call_id": tc.id,
                     })
+                else:
+                    # BUG 3 FIX: unrecognised tool calls were silently skipped,
+                    # leaving tool_result_msgs empty for that call. Sending a
+                    # messages list that has an assistant tool_calls entry but
+                    # no matching tool result causes an API error on most
+                    # backends. Return a placeholder error result so the model
+                    # always receives a response for every call it issued.
+                    console.print(
+                        f"[yellow]⚠ Unknown tool requested: '{tc.function.name}' — returning error result.[/yellow]"
+                    )
+                    tool_result_msgs.append({
+                        "role":         "tool",
+                        "content":      json.dumps({"error": f"Unknown tool: {tc.function.name}"}),
+                        "tool_call_id": tc.id,
+                    })
 
             updated_messages = messages + [assistant_tool_msg] + tool_result_msgs
             full_reply = ""
@@ -760,7 +796,13 @@ class LMStudioClient:
             sys.stdout.flush()
             return direct_content, None
 
-        return self.chat(messages, temperature, max_tokens), None
+        # BUG 4 FIX: the original code fell through to self.chat(messages, ...)
+        # when direct_content was empty. That issued a second, redundant LLM
+        # completion with the exact same messages, risking a double-response and
+        # wasting time. If the model returned an empty non-tool reply there is
+        # nothing useful to retry with; return an empty string instead.
+        console.print("[yellow]⚠ Model returned an empty response.[/yellow]")
+        return "", None
 
 
 # ====================== VOICE SPEAKER ======================
@@ -841,7 +883,9 @@ class VoiceSpeaker:
             console.print("[yellow]TTS: Kokoro returned no audio chunks[/yellow]")
             return
 
+        # Bug 1 fix: use lazy sounddevice import
         try:
+            sd = _get_sd()
             audio = np.concatenate(chunks).astype(np.float32)
             peak  = float(np.abs(audio).max())
             if peak == 0.0:
@@ -851,6 +895,8 @@ class VoiceSpeaker:
                 audio /= peak
             sd.play(audio, samplerate=KOKORO_SAMPLE_RATE)
             sd.wait()
+        except ImportError as e:
+            console.print(f"[yellow]TTS playback skipped: {e}[/yellow]")
         except Exception as e:
             console.print(f"[yellow]Audio playback error: {e}[/yellow]")
 
@@ -916,9 +962,6 @@ def run_chat():
         user_input: str = ""
 
         if voice_mode:
-            # FIX: catch mic/audio errors without crashing the session.
-            # The user's pending text input is NOT lost — we fall back to a
-            # text prompt in the same iteration instead of skipping via continue.
             try:
                 user_input = mic.listen()
             except Exception as exc:
@@ -928,7 +971,6 @@ def run_chat():
                     "Enter your message as text below.[/dim]"
                 )
                 voice_mode = False
-                # Fall through to text input below instead of continue-ing.
 
         if not voice_mode and not user_input:
             try:
@@ -1128,9 +1170,6 @@ def run_chat():
             console.print(f"[red]LM Studio error: {e}[/red]")
             continue
 
-        # FIX: always overwrite last_search_data (even with None) so that a
-        # non-search turn following a search turn doesn't incorrectly attach
-        # the old search results when the user runs /save.
         last_search_data = search_data
 
         if search_data:
@@ -1145,19 +1184,22 @@ def run_chat():
             if search_data:
                 speaker.speak("Say slash save to keep these web results in memory.")
 
+        # BUG 2 FIX: scorer.score() was called AFTER chat_history.extend(),
+        # which meant the current turn was included in BOTH the explicit
+        # user_input/assistant_output arguments AND in the history context
+        # passed to the scorer — double-counting the exchange being evaluated.
+        # Fix: score the turn first, then append it to the history.
+        score     = scorer.score(user_input, assistant_reply, chat_history)
+        important = scorer.is_important(score)
+
         chat_history.extend([
             {"role": "user",      "content": user_input},
             {"role": "assistant", "content": assistant_reply},
         ])
 
-        # FIX: trim history to MAX_HISTORY_TURNS pairs to avoid blowing the
-        # model's context window. Pairs are trimmed from the oldest end.
         max_messages = MAX_HISTORY_TURNS * 2
         if len(chat_history) > max_messages:
             chat_history = chat_history[-max_messages:]
-
-        score     = scorer.score(user_input, assistant_reply, chat_history)
-        important = scorer.is_important(score)
 
         search_hint = (
             " [dim](includes web search — /save to persist results)[/dim]"
