@@ -722,6 +722,12 @@ class LMStudioClient:
             }
 
             tool_result_msgs: list[dict] = []
+            # BUG B FIX: search_data was overwritten on every loop iteration,
+            # so when the model issued multiple web_search calls in one response
+            # only the last result was returned to the caller (for logging and
+            # /save). Fix: accumulate all searches into a list and merge them
+            # into a single dict that the caller can work with.
+            all_search_results: list[dict] = []
             for tc in tool_calls:
                 if tc.function.name == "web_search":
                     try:
@@ -736,13 +742,14 @@ class LMStudioClient:
                     if voice_notify:
                         voice_notify(f"Searching the web for: {query}")
 
-                    search_data = searcher.search(query, max_results)
+                    single_search = searcher.search(query, max_results)
+                    all_search_results.append(single_search)
 
-                    n = len(search_data.get("results", []))
-                    if search_data.get("error") and not n:
-                        console.print(f"[yellow]Search error: {search_data['error']}[/yellow]")
+                    n = len(single_search.get("results", []))
+                    if single_search.get("error") and not n:
+                        console.print(f"[yellow]Search error: {single_search['error']}[/yellow]")
                         if voice_notify:
-                            voice_notify(f"Search failed: {search_data['error']}")
+                            voice_notify(f"Search failed: {single_search['error']}")
                     else:
                         console.print(f"[dim]{n} result(s) found[/dim]")
                         if voice_notify:
@@ -750,9 +757,20 @@ class LMStudioClient:
 
                     tool_result_msgs.append({
                         "role":         "tool",
-                        "content":      json.dumps(search_data, ensure_ascii=False),
+                        "content":      json.dumps(single_search, ensure_ascii=False),
                         "tool_call_id": tc.id,
                     })
+
+            # Merge all searches into one dict so the caller has the full picture.
+            if all_search_results:
+                merged_results = [r for s in all_search_results for r in s.get("results", [])]
+                first_query = all_search_results[0].get("query", "")
+                search_data = {
+                    "query":   first_query if len(all_search_results) == 1
+                               else "; ".join(s.get("query", "") for s in all_search_results),
+                    "results": merged_results,
+                    "error":   next((s["error"] for s in all_search_results if s.get("error")), None),
+                }
                 else:
                     # BUG 3 FIX: unrecognised tool calls were silently skipped,
                     # leaving tool_result_msgs empty for that call. Sending a
@@ -953,7 +971,16 @@ def run_chat():
         "[bold yellow]Enable voice input? (y/n)[/bold yellow]", default="n"
     ).lower() in ("y", "yes")
     if voice_mode:
-        mic.pick_microphone()
+        # BUG A FIX: mic.pick_microphone() was called bare; any error
+        # (ImportError from missing sounddevice, PortAudio init failure,
+        # no input devices found) would propagate uncaught and crash the
+        # program before the chat loop even started.
+        try:
+            mic.pick_microphone()
+        except Exception as exc:
+            console.print(f"[yellow]⚠ Voice setup failed: {exc}[/yellow]")
+            console.print("[dim]Voice mode disabled — continuing in text mode.[/dim]")
+            voice_mode = False
 
     chat_history: list[dict]  = []
     last_search_data: dict | None = None
@@ -992,7 +1019,15 @@ def run_chat():
                 voice_mode = not voice_mode
                 console.print(f"[green]Voice mode {'ON' if voice_mode else 'OFF'}[/green]")
                 if voice_mode:
-                    mic.pick_microphone()
+                    # BUG A FIX: same as the startup path — wrap in try/except
+                    # so a missing sounddevice or PortAudio failure gracefully
+                    # disables voice instead of crashing.
+                    try:
+                        mic.pick_microphone()
+                    except Exception as exc:
+                        console.print(f"[yellow]⚠ Voice setup failed: {exc}[/yellow]")
+                        console.print("[dim]Voice mode disabled.[/dim]")
+                        voice_mode = False
 
             elif cmd == "/save":
                 if chat_history and len(chat_history) >= 2:
@@ -1206,7 +1241,18 @@ def run_chat():
             if search_data else ""
         )
         if important:
-            memory.save(user_input, assistant_reply, score, manual=False)
+            # BUG C FIX: the auto-save did not include search_data, but the
+            # panel still showed "(includes web search — /save to persist
+            # results)". A user following that hint would run /save, which
+            # creates a second duplicate memory entry (same conversation +
+            # search data) on top of the auto-saved one.
+            # Fix: pass search_data into the auto-save so the single entry is
+            # complete, then clear last_search_data so /save can't duplicate it.
+            memory.save(user_input, assistant_reply, score, manual=False,
+                        search_data=search_data if search_data else None)
+            if search_data:
+                last_search_data = None   # prevent /save from duplicating
+                search_hint = " [dim](web search results included)[/dim]"
             console.print(Panel(
                 f"Score: {score:.1%} SAVED | Total memories: {memory.count()}{search_hint}",
                 title="Importance",
