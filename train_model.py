@@ -140,6 +140,14 @@ def train():
     else:
         scaler = None
 
+    # BUG 5 FIX: thresh_logit was computed (and moved to the GPU) inside the
+    # inner validation loop, recreating the tensor on every single batch.
+    # It is a constant derived from a config value and should be computed
+    # once before the epoch loop begins.
+    thresh_logit = torch.log(
+        torch.tensor(CFG["importance_threshold"] / (1.0 - CFG["importance_threshold"]))
+    ).to(DEVICE)
+
     best_val_loss = float("inf")
     for epoch in range(1, CFG["epochs"] + 1):
         model.train()
@@ -190,9 +198,9 @@ def train():
                     val_loss += criterion(logits, label).item()
 
                 preds_50 = (logits >= 0.0).float()
-                thresh_logit = torch.log(
-                    torch.tensor(CFG["importance_threshold"] / (1.0 - CFG["importance_threshold"]))
-                ).to(DEVICE)
+                # Bug 5 fix: thresh_logit is now computed once before the
+                # epoch loop (see above) instead of being recreated here on
+                # every batch iteration.
                 preds_thresh = (logits >= thresh_logit).float()
 
                 correct    += (preds_50     == label).sum().item()
