@@ -760,6 +760,30 @@ class LMStudioClient:
                         "content":      json.dumps(single_search, ensure_ascii=False),
                         "tool_call_id": tc.id,
                     })
+                else:
+                    # BUG 3 FIX: unrecognised tool calls were silently skipped,
+                    # leaving tool_result_msgs empty for that call. Sending a
+                    # messages list that has an assistant tool_calls entry but
+                    # no matching tool result causes an API error on most
+                    # backends. Return a placeholder error result so the model
+                    # always receives a response for every call it issued.
+                    #
+                    # Previously this block was incorrectly placed as the else
+                    # clause of the outer `if all_search_results:` check (after
+                    # the for-loop), not as the else of
+                    # `if tc.function.name == "web_search":` inside the loop.
+                    # That meant it only ran when there were zero search results
+                    # AND it referenced `tc` after the loop had ended, causing a
+                    # NameError in edge cases.  Moving it here (inside the loop)
+                    # is the correct placement.
+                    console.print(
+                        f"[yellow]⚠ Unknown tool requested: '{tc.function.name}' — returning error result.[/yellow]"
+                    )
+                    tool_result_msgs.append({
+                        "role":         "tool",
+                        "content":      json.dumps({"error": f"Unknown tool: {tc.function.name}"}),
+                        "tool_call_id": tc.id,
+                    })
 
             # Merge all searches into one dict so the caller has the full picture.
             if all_search_results:
@@ -771,21 +795,6 @@ class LMStudioClient:
                     "results": merged_results,
                     "error":   next((s["error"] for s in all_search_results if s.get("error")), None),
                 }
-                else:
-                    # BUG 3 FIX: unrecognised tool calls were silently skipped,
-                    # leaving tool_result_msgs empty for that call. Sending a
-                    # messages list that has an assistant tool_calls entry but
-                    # no matching tool result causes an API error on most
-                    # backends. Return a placeholder error result so the model
-                    # always receives a response for every call it issued.
-                    console.print(
-                        f"[yellow]⚠ Unknown tool requested: '{tc.function.name}' — returning error result.[/yellow]"
-                    )
-                    tool_result_msgs.append({
-                        "role":         "tool",
-                        "content":      json.dumps({"error": f"Unknown tool: {tc.function.name}"}),
-                        "tool_call_id": tc.id,
-                    })
 
             updated_messages = messages + [assistant_tool_msg] + tool_result_msgs
             full_reply = ""
