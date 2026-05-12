@@ -24,6 +24,14 @@ TARGET_LOW  = 800
 TEMPERATURE = 0.85
 MAX_TOKENS  = 4096
 
+# BUG D FIX: maximum consecutive empty batches before aborting a job.
+# Previously, fetched always incremented by batch_n regardless of how
+# many unique valid examples were actually added, so the loop exited
+# silently even if every batch failed or returned only duplicates. The
+# fix tracks actual additions and escapes early on repeated empty batches
+# instead of silently under-filling the dataset.
+MAX_EMPTY_BATCHES = 5
+
 console = Console(force_terminal=True)
 
 HIGH_IMPORTANCE_TOPICS = [
@@ -154,13 +162,6 @@ def _deduplicate(examples: list[dict]) -> list[dict]:
 
 
 def _distribute(total_needed: int, topics: list[tuple]) -> list[tuple[str, int, str, int]]:
-    """
-    Distribute `total_needed` examples across topics as evenly as possible.
-    FIX: plain integer division left a systematic shortfall because
-         800 // 7 == 114 and 114 * 7 == 798 (2 examples short every run).
-         We now hand out the remainder one-by-one to the first N topics so
-         the total always equals `total_needed` exactly.
-    """
     n          = len(topics)
     base       = total_needed // n
     remainder  = total_needed % n
@@ -239,12 +240,27 @@ def generate() -> None:
     ) as progress:
         task = progress.add_task("Generating …", total=total_batches)
 
-        # FIX: removed the ThreadPoolExecutor(max_workers=1) wrapper.
-        # A pool with a single worker adds thread-management overhead while
-        # providing zero concurrency benefit. Batches are now called directly.
         for job in jobs:
-            fetched = 0
+            # BUG D FIX: previously fetched always incremented by batch_n
+            # regardless of how many unique valid examples were actually added.
+            # If retries failed or the LLM returned only duplicates, the loop
+            # exited silently with the dataset below target.
+            # Fix: increment fetched only by the number of unique examples
+            # added. To prevent an infinite loop when a category is truly
+            # exhausted (LLM keeps returning duplicates or failing), bail out
+            # after MAX_EMPTY_BATCHES consecutive batches that produced nothing.
+            fetched       = 0
+            empty_batches = 0
+
             while fetched < job.remaining:
+                if empty_batches >= MAX_EMPTY_BATCHES:
+                    console.print(
+                        f"[yellow]⚠ '{job.category}': {MAX_EMPTY_BATCHES} consecutive "
+                        f"empty batches — stopping early. "
+                        f"Got {fetched}/{job.remaining} examples.[/yellow]"
+                    )
+                    break
+
                 batch_n = min(BATCH_SIZE, job.remaining - fetched)
                 progress.update(
                     task,
@@ -274,8 +290,11 @@ def generate() -> None:
                     with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
                         for ex in new_in_batch:
                             f.write(json.dumps(ex, ensure_ascii=False) + "\n")
+                    fetched += len(new_in_batch)
+                    empty_batches = 0
+                else:
+                    empty_batches += 1
 
-                fetched += batch_n
                 progress.advance(task)
 
     console.print(
